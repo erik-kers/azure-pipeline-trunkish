@@ -1,0 +1,79 @@
+variables:
+  containerRegistry: '<Your Azure ACR>'
+  imageRepository: '<Your image repository in ACR>'
+  environment: $[ if startsWith(variables['Build.SourceBranch'], 'refs/heads/releases/'), 'prod', 'test) ']
+  appNameTest: '<Your App in TEST>'
+  appNameProd: '<Your App in PROD>'
+  subscription: '<Your Azure Subscription>'
+  gitRepository: '<Your GIT repository>'
+
+  # Environment-specific values
+  ${{ if eq(variables.environment, 'test') }}:
+    appName: $(appNameTest)
+    deploymentSlot: 'development'
+  ${{ if eq(variables.environment, 'prod') }}:
+    appName: $(appNameProd)
+    deploymentSlot: 'uat'
+
+stages:
+- stage: BuildAndPush
+  displayName: 🛠️ Build and Push
+  jobs:
+  - job: BuildAndPush
+    pool:
+      vmImage: 'ubuntu-latest'
+    condition: and(succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), startsWith(variables['Build.SourceBranch'], 'refs/heads/releases/')))
+    steps:
+    - ${{ if startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/') }}:
+      - script: echo "Skipping build for feature branch"
+    - ${{ if not(startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/')) }}:
+    - task: Docker@2
+      displayName: 🐳 Build and Push Docker image
+      inputs:
+        command: buildAndPush
+        containerRegistry: $(containerRegistry)
+        repository: $(imageRepository)
+        tags: |
+          $(environment)-$(Build.BuildId)
+
+- stage: CreatePullRequest
+  displayName: 💻 Create Pull Request
+  condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/heads/feature/'))
+  jobs:
+  - job: CreatePullRequest
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: PublishPipelineArtifact@1
+      displayName: '🚀 Publish Artifact: Drop'
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)'
+        artifact: 'drop'
+    - task: PullRequest@3
+      displayName: '📤 Create Pull Request'
+      inputs:
+        repository: $(gitRepository)
+        sourceBranch: '$(Build.SourceBranch)'
+        targetBranch: 'main'
+        title: 'Pull request from $(Build.SourceBranch)'
+
+- stage: Deploy
+  displayName: 🚀 Deploy to App Service
+  dependsOn: BuildAndPush
+  condition: and(succeeded(), ne(variables['Build.SourceBranch'], 'refs/heads/feature/*'))
+  jobs:
+  - deployment: DeployWeb
+    pool:
+      vmImage: 'ubuntu-latest'
+    environment: '${{ variables.environment }}'
+    strategy:
+      runOnce:
+        deploy:
+          displayName: '🌎 Deploy to Web App - ${{ variables.environment }}'
+          inputs:
+            azureSubscription: '$(subscription)'
+            appType: webAppLinux
+            appName: '${{ variables.appName }}'
+            deploymentSlot: '${{ variables.deploymentSlot }}'
+            images: |
+              $(containerRegistry)/$(imageRepository):$(tagPrefix)-$(Build.BuildId)
